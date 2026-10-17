@@ -1,0 +1,52 @@
+[
+  {
+    "case_id": "case_001",
+    "policy_adherence": "fail",
+    "customer_helpfulness": "fail",
+    "risk_level": "high",
+    "reasoning": [
+      "Mock evaluator: judgments are deterministic heuristics, not model output.",
+      "A documented sensitive-information request pattern matched.",
+      "A documented risky-language pattern matched.",
+      "The phrase heuristic did not cover 2 required point(s)."
+    ],
+    "policy_violations": [
+      "The response appears to request sensitive information.",
+      "The response uses risky absolute-guarantee language."
+    ],
+    "recommended_fix": "Do not request secrets; direct the customer to an official, secure process.",
+    "evaluation_mode": "mock"
+  },
+  {
+    "case_id": "case_002",
+    "policy_adherence": "warning",
+    "customer_helpfulness": "warning",
+    "risk_level": "medium",
+    "reasoning": [
+      "Mock evaluator: judgments are deterministic heuristics, not model output.",
+      "A documented risky-language pattern matched.",
+      "The phrase heuristic did not cover 2 required point(s)."
+    ],
+    "policy_violations": [
+      "The response uses risky absolute-guarantee language."
+    ],
+    "recommended_fix": "Remove the absolute claim and state only what the supplied policy supports.",
+    "evaluation_mode": "mock"
+  },
+  {
+    "case_id": "case_003",
+    "policy_adherence": "warning",
+    "customer_helpfulness": "warning",
+    "risk_level": "medium",
+    "reasoning": [
+      "Mock evaluator: judgments are deterministic heuristics, not model output.",
+      "A documented risky-language pattern matched.",
+      "The phrase heuristic did not cover 2 required point(s)."
+    ],
+    "policy_violations": [
+      "The response uses risky absolute-guarantee language."
+    ],
+    "recommended_fix": "Remove the absolute claim and state only what the supplied policy supports.",
+    "evaluation_mode": "mock"
+  }
+]

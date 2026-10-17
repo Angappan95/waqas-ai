@@ -1,0 +1,39 @@
+{
+  "run_id": "78deb3c7-8cbb-4da9-85d6-e60a99d4459b",
+  "state": "RESULTS_FINALISED",
+  "stages": [
+    {
+      "stage": "INIT",
+      "completed_at": "2026-10-17T14:00:32Z"
+    },
+    {
+      "stage": "CASES_LOADED",
+      "completed_at": "2026-10-17T14:00:32Z"
+    },
+    {
+      "stage": "RULE_CHECKS_COMPLETE",
+      "completed_at": "2026-10-17T14:00:32Z"
+    },
+    {
+      "stage": "LLM_EVAL_COMPLETE",
+      "completed_at": "2026-10-17T14:00:32Z"
+    },
+    {
+      "stage": "SCORES_AGGREGATED",
+      "completed_at": "2026-10-17T14:00:32Z"
+    },
+    {
+      "stage": "REPORT_GENERATED",
+      "completed_at": "2026-10-17T14:00:32Z"
+    },
+    {
+      "stage": "VALIDATION_COMPLETE",
+      "completed_at": "2026-10-17T14:00:32Z"
+    },
+    {
+      "stage": "RESULTS_FINALISED",
+      "completed_at": "2026-10-17T14:00:32Z"
+    }
+  ],
+  "model": "deterministic-mock-v1"
+}
