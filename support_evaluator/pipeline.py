@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import uuid
@@ -11,11 +12,10 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from .analysis import build_disagreements
-from .artifacts import load_json, validate_artifacts, write_json
+from .artifacts import validate_artifacts, write_json
 from .config import (
     CALL_STATUS_FAILED,
     CALL_STATUS_SUCCEEDED,
-    GENERATED_ARTIFACTS,
     PIPELINE_STAGES,
     PROJECT_ROOT,
     PROJECT_ROOT_ARGUMENT,
@@ -28,12 +28,14 @@ from .llm import EvaluationError, evaluate_case
 from .reporting import generate_report
 from .rules import check_rules, validate_cases
 from .scoring import aggregate_scores
+from .run_store import begin_run, finish_run
 
 
 class PipelineState(TypedDict, total=False):
     """Values produced and consumed by pipeline stages."""
 
     root: Path
+    project_root: Path
     run_id: str
     completed_stages: list[dict[str, str]]
     cases: list[dict[str, Any]]
@@ -46,6 +48,9 @@ class PipelineState(TypedDict, total=False):
     validation_result: dict[str, Any]
     failed_stage: str
     error: str
+    input_sha256: str
+    policy_sha256: str
+    policy_versions: list[str]
 
 
 def _timestamp() -> str:
@@ -64,11 +69,28 @@ def _manifest(state: PipelineState, status: str) -> dict[str, Any]:
         manifest["failed_stage"] = state["failed_stage"]
     if state.get("error"):
         manifest["error"] = state["error"]
+    if state.get("input_sha256"):
+        manifest["input_snapshot"] = "cases.json"
+        manifest["input_sha256"] = state["input_sha256"]
+    if state.get("policy_sha256"):
+        manifest["policy_snapshot"] = "embedded policy_context in cases.json"
+        manifest["policy_sha256"] = state["policy_sha256"]
+    if state.get("policy_versions"):
+        manifest["policy_versions"] = state["policy_versions"]
     return manifest
 
 
 def _load_case_inputs(state: PipelineState) -> dict[str, Any]:
-    cases = validate_cases(load_json(state["root"] / "cases.json"))
+    input_bytes = (state["project_root"] / "cases.json").read_bytes()
+    (state["root"] / "cases.json").write_bytes(input_bytes)
+    state["input_sha256"] = hashlib.sha256(input_bytes).hexdigest()
+    cases = validate_cases(json.loads(input_bytes.decode("utf-8")))
+    state["policy_versions"] = sorted({
+        str(case["policy_context"].get("version", "unspecified")) for case in cases
+    })
+    policies = [case["policy_context"] for case in cases]
+    policy_bytes = json.dumps(policies, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    state["policy_sha256"] = hashlib.sha256(policy_bytes).hexdigest()
     return {"cases": cases}
 
 
@@ -169,16 +191,17 @@ def _validate_run(state: PipelineState) -> dict[str, Any]:
 def run_pipeline(root: Path = PROJECT_ROOT) -> dict[str, Any]:
     project_root = root.expanduser().resolve()
     project_root.mkdir(parents=True, exist_ok=True)
-    for artifact in GENERATED_ARTIFACTS:
-        path = project_root / artifact
-        if path.exists():
-            path.unlink()
-
+    run_id = str(uuid.uuid4())
+    run_dir = begin_run(project_root, run_id, _timestamp())
     state: PipelineState = {
-        "root": project_root,
-        "run_id": str(uuid.uuid4()),
+        "root": run_dir,
+        "project_root": project_root,
+        "run_id": run_id,
         "completed_stages": [{"stage": PIPELINE_STAGES[0], "completed_at": _timestamp()}],
     }
+    initial_manifest = _manifest(state, RUN_STATUS_IN_PROGRESS)
+    write_json(run_dir / "run_manifest.json", initial_manifest)
+    write_json(project_root / "run_manifest.json", initial_manifest)
     operations = (
         _load_case_inputs,
         _run_rule_checks,
@@ -197,17 +220,21 @@ def run_pipeline(root: Path = PROJECT_ROOT) -> dict[str, Any]:
         state["completed_stages"].append(
             {"stage": RUN_STATUS_FINALIZED, "completed_at": _timestamp()},
         )
-        write_json(project_root / "run_manifest.json", _manifest(state, RUN_STATUS_FINALIZED))
+        finalized_manifest = _manifest(state, RUN_STATUS_FINALIZED)
+        write_json(run_dir / "run_manifest.json", finalized_manifest)
+        finish_run(project_root, run_id, RUN_STATUS_FINALIZED, _timestamp())
     except Exception as error:
         state["failed_stage"] = current_stage
         state["error"] = f"{type(error).__name__}: {error}"
-        write_json(project_root / "run_manifest.json", _manifest(state, RUN_STATUS_FAILED))
+        write_json(run_dir / "run_manifest.json", _manifest(state, RUN_STATUS_FAILED))
+        finish_run(project_root, run_id, RUN_STATUS_FAILED, _timestamp())
         raise RuntimeError(f"{current_stage}: {state['error']}") from error
     return {
         "case_count": len(state["cases"]),
         "mode": state["evaluator_mode"],
         "run_id": state["run_id"],
         "project_root": str(project_root),
+        "run_directory": str(run_dir),
     }
 
 
@@ -227,6 +254,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         f"Evaluation complete: {result['case_count']} case(s), mode={result['mode']}, "
-        f"project_root={result['project_root']}."
+        f"run_id={result['run_id']}, archive={result['run_directory']}."
     )
     return 0

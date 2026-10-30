@@ -29,6 +29,7 @@ RUN_STATUS_IN_PROGRESS = "IN_PROGRESS"
 RUN_STATUS_FAILED = "FAILED"
 RUN_STATUS_FINALIZED = "RESULTS_FINALISED"
 PROJECT_ROOT_ARGUMENT = "--project-root"
+RUNS_DIRECTORY = ".runs"
 
 HEURISTIC_VERSION = "phrase-coverage-v1"
 STOP_WORDS = frozenset({
@@ -111,9 +112,23 @@ class ScoreConfig:
     high_risk_penalty: int = 25
     fail_below_score: int = 50
     review_below_score: int = 85
+    critical_finding_penalty: int = 45
+    major_finding_penalty: int = 25
+    minor_finding_penalty: int = 10
 
 
 SCORE = ScoreConfig()
+FINDING_SEVERITIES = frozenset({"critical", "major", "minor"})
+FINDING_CODES = frozenset({
+    "sensitive_information_request",
+    "risky_absolute_guarantee",
+    "required_point_not_observed",
+    "required_point_ambiguous",
+    "policy_violation",
+    "unsupported_commitment",
+    "misleading_guidance",
+    "unclear_or_unhelpful",
+})
 REPORT_EXAMPLE_LIMIT = 10
 REPORT_PATTERN_LIMIT = 5
 

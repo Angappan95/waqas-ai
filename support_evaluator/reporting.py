@@ -20,8 +20,10 @@ def _failure_patterns(
         if rule["prompt_safety"]["matched"]:
             patterns["Prompt manipulation attempt"] += 1
         coverage = rule["required_point_coverage"]
-        if coverage["covered_count"] < coverage["total"]:
+        if any(item.get("status") == "not_observed" for item in coverage["items"]):
             patterns["Required guidance not obviously covered"] += 1
+        if any(item.get("status") == "possible_support" for item in coverage["items"]):
+            patterns["Required guidance needs contextual review"] += 1
         if evaluation["policy_adherence"] != "pass":
             patterns[f"LLM policy adherence: {evaluation['policy_adherence']}"] += 1
         if evaluation["risk_level"] != "low":
@@ -40,9 +42,12 @@ def _deterministic_examples(rules: list[dict[str, Any]]) -> list[tuple[str, str]
         if rule["prompt_safety"]["matched"]:
             examples.append((case_id, "prompt-manipulation language matched"))
         coverage = rule["required_point_coverage"]
-        missing = coverage["total"] - coverage["covered_count"]
+        missing = sum(item.get("status") == "not_observed" for item in coverage["items"])
         if missing:
             examples.append((case_id, f"{missing} required point(s) were not obviously covered"))
+        ambiguous = sum(item.get("status") == "possible_support" for item in coverage["items"])
+        if ambiguous:
+            examples.append((case_id, f"{ambiguous} required point(s) had keyword overlap without confirmed semantic coverage"))
     return examples
 
 
@@ -121,6 +126,25 @@ def generate_report(
     else:
         lines.append("No low-versus-elevated risk disagreements were found in this run.")
 
+    lines.extend(["", "## Evidence-backed Findings", ""])
+    findings_found = False
+    for evaluation in evaluations:
+        for finding in evaluation.get("findings", []):
+            findings_found = True
+            reference = finding["policy_reference"]
+            if reference.get("type") == "builtin":
+                policy_item = f"built-in check `{reference['id']}`"
+            else:
+                policy_item = f"policy `{reference['field']}[{reference['index']}]`"
+            evidence = finding.get("evidence")
+            span = "omission" if evidence is None else f"response chars {evidence['start']}-{evidence['end']}"
+            lines.append(
+                f"- Case `{evaluation['case_id']}`: `{finding['code']}` ({finding['severity']}); "
+                f"{policy_item}; {span}."
+            )
+    if not findings_found:
+        lines.append("No evidence-backed findings were returned.")
+
     lines.extend(["", "## LLM Judgment Beyond Phrase Checks", ""])
     added_value = _llm_added_value(rules, evaluations)
     if added_value:
@@ -140,22 +164,22 @@ def generate_report(
     modes = sorted({evaluation["evaluation_mode"] for evaluation in evaluations})
     lines.extend([
         "", "## Limitations", "",
-        "- Phrase and keyword heuristics are intentionally simple; paraphrases can be missed and matching words can create false positives.",
+        "- Phrase and keyword checks are screening signals; keyword overlap is marked for contextual review rather than treated as confirmed semantic coverage.",
         "- Negation handling only checks a small preceding word window; quoted or complex language may be misclassified.",
         "- Prompt-safety checks use a limited phrase list and can miss paraphrases or flag quoted examples.",
         "- The mock evaluator mirrors deterministic signals and is not evidence of actual model judgment.",
         "- Gemini review can be inconsistent and is constrained to supplied policy; common-value redaction is not exhaustive.",
         f"- Evaluation mode(s) in this run: {', '.join(modes)}.",
         "", "## Scoring", "",
-        f"Scores start at {SCORE.base_score}. Rule penalties: sensitive request {SCORE.sensitive_request_penalty}, "
-        f"risky guarantee {SCORE.risky_guarantee_penalty}, each uncovered required point "
-        f"{SCORE.missing_required_point_penalty}. Evaluation penalties: policy fail/warning "
-        f"{SCORE.policy_fail_penalty}/{SCORE.policy_warning_penalty}, helpfulness fail/warning "
-        f"{SCORE.helpfulness_fail_penalty}/{SCORE.helpfulness_warning_penalty}, high/medium risk "
-        f"{SCORE.high_risk_penalty}/{SCORE.medium_risk_penalty}. Scores are clamped to "
-        f"{SCORE.minimum_score}-{SCORE.maximum_score}. Fail applies for a sensitive request, policy fail, "
-        f"high risk, or score below {SCORE.fail_below_score}; otherwise review applies below "
-        f"{SCORE.review_below_score} or for any warning/medium risk. Response length is reported, not penalized.",
+        f"Scores start at {SCORE.base_score}. Deterministic penalties: sensitive request "
+        f"{SCORE.sensitive_request_penalty}, risky guarantee {SCORE.risky_guarantee_penalty}, "
+        f"and each unobserved required point {SCORE.missing_required_point_penalty}. "
+        f"Unique model findings add severity penalties (critical/major/minor: "
+        f"{SCORE.critical_finding_penalty}/{SCORE.major_finding_penalty}/{SCORE.minor_finding_penalty}); "
+        "findings matching an existing deterministic reason are counted once. Scores are clamped to "
+        f"{SCORE.minimum_score}-{SCORE.maximum_score}. Critical findings or a score below "
+        f"{SCORE.fail_below_score} fail; uncertain evidence, other findings, or a score below "
+        f"{SCORE.review_below_score} require review. Response length is reported, not penalized.",
         "",
     ])
     return "\n".join(lines)

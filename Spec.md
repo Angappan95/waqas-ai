@@ -20,7 +20,7 @@ Disagreement analysis and prompt-safety detection are optional stretch goals and
 
 ### 3. Input Contract
 
-The input is a UTF-8 JSON file named `cases.json` at the project root. Its top-level value is an array of cases. Each case has this shape:
+The input is a UTF-8 JSON file named `cases.json` at the project root. Its top-level value is an array of cases. Each case has this shape. `policy_context.version` is recommended and identifies the policy revision used; omitted versions are recorded as `unspecified`:
 
 ```json
 {
@@ -28,6 +28,7 @@ The input is a UTF-8 JSON file named `cases.json` at the project root. Its top-l
 	"user_message": "string",
 	"assistant_response": "string",
 	"policy_context": {
+		"version": "policy revision",
 		"allowed_actions": ["string"],
 		"disallowed_actions": ["string"],
 		"required_points": ["string"]
@@ -45,7 +46,7 @@ Enforce these states in this exact order:
 
 Each stage may begin only after its predecessor completes. A failure stops progression and must not result in `RESULTS_FINALISED`. In particular, `report.md` must not be generated until both `rule_checks.json` and `llm_evaluations.json` are complete. Validation runs after report generation and before finalization.
 
-Write `run_manifest.json` with the run ID, ordered stage names, UTC ISO-8601 completion timestamps, and final state. The validator uses it to check stage order and that report generation followed rule checks, LLM evaluation, and score aggregation. A failed run must be identifiable as incomplete; it must not present stale outputs as a newly finalized result.
+Write a manifest into `.runs/<run_id>/run_manifest.json` with the run ID, input and policy digests, ordered stage names, UTC ISO-8601 completion timestamps, and final state. Preserve every run, including failed attempts. `.runs/index.json` tracks the latest attempt and latest successful run. Root-level artifact files are an atomically published convenience view of the latest attempt. A failed run must be identifiable as incomplete and must never make prior results appear to belong to the failed run.
 
 ### 5. Deterministic Rule Checks
 
@@ -53,10 +54,10 @@ For every case, compute the following without calling an LLM and write one resul
 
 - Whether the assistant response appears to request sensitive information.
 - Whether it makes a risky absolute guarantee (examples include "always", "instantly", and "immediately").
-- Whether each `required_points` item appears covered by simple phrase/keyword heuristics.
+- Whether each `required_points` item has exact phrase support, possible keyword support, or was not observed.
 - Response length in characters (Python string length).
 
-Every heuristic must be documented, deterministic, and applied identically to every case. Record enough machine-readable detail to explain each result, including the signal, match result, and required-point-level coverage; do not store raw sensitive excerpts as evidence. The artifact contains one object per input case, keyed by `case_id`, and includes a heuristic version or equivalent identifier.
+Every heuristic must be documented, deterministic, and applied identically to every case. Record enough machine-readable detail to explain each result, including stable finding codes, match status, required-point coverage, and character offsets. Never store matched text as evidence. The artifact contains one object per input case, keyed by `case_id`, and includes a heuristic version or equivalent identifier.
 
 The adopted deterministic heuristic contract is:
 
@@ -64,10 +65,10 @@ The adopted deterministic heuristic contract is:
 - Sensitive-information requests match the versioned patterns in `support_evaluator/config.py`: direct requests to send/share/provide/tell/give/reply with/enter/type passwords, passcodes, PINs, security or verification codes, one-time codes, API keys, or secrets; explicit password questions; and requests to ask for/request a password.
 - Risky language matches the terms `always`, `instantly`, `immediately`, `guaranteed`, `guarantee`, or `definitely`.
 - For sensitive requests and risky terms, a match is suppressed if one of `cannot`, `not`, `never`, `avoid`, or `without` occurs in the four preceding words (within a 45-character lookback). This limited rule applies equally to warnings and ordinary text. Quotation marks receive no special treatment, so quoted examples may match.
-- A required point is covered by a normalized whole-phrase match or by matching at least half (rounded up, with a minimum of one) of its distinct non-stopword tokens. The stopword list and 0.5 coverage ratio are defined in `support_evaluator/config.py`. Each item's method, matched tokens, required tokens, and threshold are recorded.
+- A required point is exact phrase support when the normalized whole phrase appears. Matching at least half (rounded up, with a minimum of one) of its distinct non-stopword tokens is only `possible_support`; it is sent for contextual review and is not treated as semantic proof. No matching evidence is `not_observed`. The stopword list and 0.5 ratio are defined in `support_evaluator/config.py`. Each item records its status, method, matched tokens, required tokens, threshold, and evidence offsets.
 - Response length is Python `len()` on the original response string. The artifact identifies the heuristic as `phrase-coverage-v1`.
 
-These are transparent screening heuristics, not an approved or complete policy classifier. Keep the positive/negative examples in the standard-library test suite and update the heuristic version if semantics change.
+These are transparent screening heuristics, not an approved or complete policy classifier. An exact phrase or keyword match remains evidence of text presence, not correctness or contextual compliance. Update the heuristic version if matching semantics change.
 
 ### 6. LLM Evaluation
 
@@ -90,9 +91,21 @@ The structured evaluation for every case must contain:
 	"risk_level": "low | medium | high",
 	"reasoning": ["string"],
 	"policy_violations": ["string"],
-	"recommended_fix": "string"
+	"recommended_fix": "string",
+	"findings": [
+		{
+			"code": "stable finding code",
+			"policy_reference": {"field": "disallowed_actions", "index": 0},
+			"severity": "critical | major | minor",
+			"rationale": "string",
+			"evidence": {"start": 0, "end": 12, "quote": "redacted response span"}
+		}
+	],
+	"evaluation_schema_version": "2"
 }
 ```
+
+Every non-passing judgment must include at least one finding. A finding references an indexed policy item or a matching built-in rule. Evidence offsets and quote must match the exact assistant response used for evaluation (redacted before a Gemini request). The quote is used for validation and discarded; artifacts retain only offsets and a SHA-256 digest of the span. An omitted required point may use null response evidence while citing its required-point policy entry.
 
 Save one evaluation per case in `llm_evaluations.json`. Clearly label whether each result came from `mock` or `gemini` (for example, an additional `evaluation_mode` field). The mock evaluator must be deterministic, use the same output contract, and not imply that its judgment came from a real model. If `GEMINI_API_KEY` is absent, use mock mode. If it is present, require `GEMINI_MODEL`; provider errors or schema-invalid responses fail the run rather than silently switching modes. Do not retry a case: schema validation is the selected reliability feature, and the required successful-run cardinality is one invocation per case.
 
@@ -119,13 +132,13 @@ Use `provider: "mock"` and a documented mock model identifier for mock runs; liv
 
 Compute scores in Python only; the LLM must not calculate or select the numeric score or final status. For each case, emit a score from 0 through 100, status `pass`, `review`, or `fail`, and an explanation that identifies the rule and LLM signals affecting the result. Aggregation must be deterministic for the same validated inputs and evaluations. A serious policy breach or risky response must not pass solely because it is polite; missing required guidance must be reflected.
 
-The adopted formula starts at 100; subtracts 45 for a sensitive-information request, 30 for a risky guarantee, and 10 for each uncovered required point; subtracts 35/15 for LLM policy `fail`/`warning`, 15/7 for helpfulness `fail`/`warning`, and 25/10 for `high`/`medium` risk; then clamps to 0-100. Status precedence is `fail` for a sensitive-information request, policy `fail`, high risk, or score below 50; otherwise `review` for score below 85, any policy/helpfulness warning, or medium risk; otherwise `pass`. Length is reported but not penalized. These constants are defined centrally in `support_evaluator/config.py` and explanations itemize all applied deductions.
+The adopted formula starts at 100; subtracts 45 for a sensitive-information request, 30 for a risky guarantee, and 10 for each unobserved required point. Possible keyword support does not incur a missing-point penalty but requires review. Independent model findings subtract 45/25/10 for critical/major/minor severity. A model finding sharing the same code and policy reference as a deterministic finding is counted once. Scores are clamped to 0-100. Critical findings or a score below 50 fail; other findings, uncertain evidence, or a score below 85 require review; otherwise the case passes. These constants are defined centrally in `support_evaluator/config.py` and explanations itemize all applied deductions.
 
 Save one result per case in `final_scores.json`. The schema must include `case_id`, `score`, `status`, and an explanation (preferably structured into rule adjustments, LLM adjustments, and final rationale so the calculation can be audited).
 
 ### 9. Required Artifacts
 
-A successful run produces these project-root artifacts:
+A successful run archives these artifacts in `.runs/<run_id>/`:
 
 - `cases.json`: starter input, replaceable without code changes.
 - `rule_checks.json`: one deterministic-check result per case.
@@ -137,7 +150,7 @@ A successful run produces these project-root artifacts:
 
 `disagreements.json` is an optional stretch-goal artifact and is not required by the validator.
 
-The project also includes `main.py`, `validate.py`, and a README with the requirements in Section 2. A run that fails must not claim to have produced finalized results.
+Root-level files with the same names are an atomically published latest-attempt view. `.runs/index.json` records the latest attempt and latest successful run. Use `python validate.py --run-id <run_id>` to validate a specific archived run; without `--run-id`, validation checks the root-level latest-attempt view. A failed attempt remains archived with its own input snapshot and failure manifest. The project also includes `main.py`, `validate.py`, and a README with the requirements in Section 2.
 
 ### 10. Reviewer Report
 
@@ -158,11 +171,12 @@ Do not invent examples or hard-code the sample cases. If replacement inputs do n
 - Required artifacts exist and are readable; JSON artifacts parse and JSONL has one valid JSON object per non-empty line.
 - Input cases satisfy the input contract; rule checks, LLM evaluations, and scores each have exactly one record per input case with matching unique IDs.
 - LLM evaluation values match the declared schema and allowed enums, including clear mock/live labeling.
+- Every non-passing finding cites an existing policy item and a verified span of the evaluated response, or identifies an omitted required point.
 - Scores are in range and can be recomputed from the documented code-side formula; explanations reconcile with the signals.
 - A successful-run call log has exactly one matching record per case, and the logged provider/model and input/output paths agree with the produced evaluations.
 - `run_manifest.json` records valid stages in order, report generation follows required upstream stages, validation completed before finalization, and the run is finalized.
 
-The chosen reliability feature is schema validation of every LLM response before it is accepted or written as a completed evaluation. Invalid output fails the run; do not retry. The manifest also supplies evidence for stage-order validation. Validation must inspect existing artifacts, recompute deterministic rule checks and scores, check report sections and case coverage, and must not call a provider or require a secret.
+The chosen reliability feature is schema and evidence validation of every LLM response before it is accepted or written as a completed evaluation. Invalid output fails the run; do not retry. The manifest also supplies evidence for stage order, input digest, and policy digest. Validation must inspect archived artifacts, recompute deterministic rule checks and scores, check report sections and case coverage, and must not call a provider or require a secret.
 
 ### 12. Privacy and Errors
 
@@ -170,7 +184,7 @@ Keep original input local. Redact common sensitive values before live provider c
 
 Live redaction uses the patterns in `support_evaluator/config.py` and these placeholders: `[EMAIL_REDACTED]`, `[PHONE_REDACTED]`, `[ACCOUNT_ID_REDACTED]`, and `[SECRET_REDACTED]`. Patterns target email-shaped values; phone-like digit strings; values after account/card/routing/payment/transaction labels; and values after password/passcode/secret/API-key/token labels followed by `is`, `:`, or `=`. They are not exhaustive. Redaction must preserve all request fields and surrounding context. Do not log API keys, prompts, or raw case values.
 
-On startup, clear generated artifacts from the prior run. On failure, record the failed stage and error in a non-finalized manifest, stop further stages, and ensure the manifest never contains `RESULTS_FINALISED`. Error messages should identify the stage and case where possible.
+On startup, create an isolated run directory and mark the latest-attempt view `IN_PROGRESS`; never delete prior runs. On failure, preserve the partial run with its failed stage and error, stop further stages, and ensure its manifest never contains `RESULTS_FINALISED`. Error messages should identify the stage and case where possible.
 
 ### 13. Acceptance Criteria
 

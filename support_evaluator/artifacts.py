@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -19,8 +21,9 @@ from .config import (
     REQUIRED_ARTIFACTS,
     RUN_STATUS_FINALIZED,
     RUN_STATUS_IN_PROGRESS,
+    RUNS_DIRECTORY,
 )
-from .llm import validate_evaluation
+from .llm import _redact, validate_evaluation
 from .rules import check_rules, validate_cases
 from .scoring import aggregate_scores
 
@@ -76,6 +79,22 @@ def _validate_rule_result(rule: Any, expected_case_id: str) -> None:
     response_length = rule.get("response_length_chars")
     if not isinstance(response_length, int) or response_length < 0:
         raise ValueError(f"response length is invalid for case {expected_case_id!r}")
+
+
+def _legacy_rule_shape(rule: dict[str, Any]) -> dict[str, Any]:
+    """Project a result onto the v1 artifact shape for read-only compatibility."""
+    value = copy.deepcopy(rule)
+    value.pop("rule_findings", None)
+    value.pop("policy_version", None)
+    for field in ("sensitive_information_request", "risky_absolute_guarantee", "prompt_safety"):
+        if isinstance(value.get(field), dict):
+            value[field].pop("evidence", None)
+    coverage = value.get("required_point_coverage", {})
+    for item in coverage.get("items", []):
+        if isinstance(item, dict):
+            for key in ("index", "status", "evidence"):
+                item.pop(key, None)
+    return value
 
 
 def _read_call_log(path: Path) -> list[dict[str, Any]]:
@@ -172,12 +191,26 @@ def validate_artifacts(
     disagreements_path = root / "disagreements.json"
     disagreements = load_json(disagreements_path) if disagreements_path.is_file() else None
     manifest = manifest_override or load_json(root / "run_manifest.json")
+    if root.parent.name == RUNS_DIRECTORY and root.name != manifest.get("run_id"):
+        raise ValueError("archive directory does not match run_manifest.json run_id")
     if not all(isinstance(records, list) for records in (rules, evaluations, scores)):
         raise ValueError(
             "rule checks, evaluations, and scores must be JSON arrays"
         )
     if disagreements is not None and not isinstance(disagreements, list):
         raise ValueError("disagreements.json must contain a JSON array when present")
+
+    input_digest = manifest.get("input_sha256") if isinstance(manifest, dict) else None
+    if input_digest is not None:
+        actual_input_digest = hashlib.sha256(cases_path.read_bytes()).hexdigest()
+        if input_digest != actual_input_digest:
+            raise ValueError("cases.json does not match the input snapshot digest in run_manifest.json")
+    policy_digest = manifest.get("policy_sha256") if isinstance(manifest, dict) else None
+    if policy_digest is not None:
+        policies = [case["policy_context"] for case in cases]
+        policy_bytes = json.dumps(policies, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if policy_digest != hashlib.sha256(policy_bytes).hexdigest():
+            raise ValueError("case policy contexts do not match the policy digest in run_manifest.json")
 
     case_ids = [case["case_id"] for case in cases]
     record_sets = (
@@ -192,13 +225,25 @@ def validate_artifacts(
 
     for case, rule, case_id in zip(cases, rules, case_ids, strict=True):
         _validate_rule_result(rule, case_id)
-        if rule != check_rules(case):
+        expected_rule = check_rules(case)
+        matches = rule == expected_rule if "rule_findings" in rule else _legacy_rule_shape(rule) == _legacy_rule_shape(expected_rule)
+        if not matches:
             raise ValueError(f"rule-check artifact does not match deterministic checks for {case_id!r}")
-    for evaluation, case_id in zip(evaluations, case_ids, strict=True):
+    for case, evaluation, case_id in zip(cases, evaluations, case_ids, strict=True):
         if evaluation.get("evaluation_mode") not in EVALUATION_MODES:
             raise ValueError(f"evaluation for {case_id!r} is missing a valid evaluation_mode")
         schema = {key: value for key, value in evaluation.items() if key != "evaluation_mode"}
-        validate_evaluation(schema, case_id)
+        validate_evaluation(
+            schema,
+            case_id,
+            case=case,
+            response_for_evidence=(
+                _redact(case["assistant_response"])
+                if evaluation.get("evaluation_mode") == "gemini"
+                else case["assistant_response"]
+            ),
+            require_findings=evaluation.get("evaluation_schema_version") == "2",
+        )
     expected_scores = aggregate_scores(rules, evaluations)
     if scores != expected_scores:
         raise ValueError("final_scores.json does not match the deterministic aggregation formula")
